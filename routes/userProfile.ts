@@ -7,6 +7,7 @@ import { type Request, type Response, type NextFunction } from 'express'
 import { AllHtmlEntities as Entities } from 'html-entities'
 import config from 'config'
 import fs from 'node:fs/promises'
+import vm from 'node:vm'
 
 import * as challengeUtils from '../lib/challengeUtils'
 import { themes } from '../views/themes/themes'
@@ -49,44 +50,37 @@ export function getUserProfile () {
       return
     }
 
-    let username = user.username
+    const username = user.username
+    let displayUsername = username ?? ''
 
-    if (username?.match(/#{(.*)}/) !== null && utils.isChallengeEnabled(challenges.usernameXssChallenge)) {
-      req.app.locals.abused_ssti_bug = true
-      const code = username?.substring(2, username.length - 1)
+    if (username?.match(/#{(.*)}/) !== null) {
+      if (utils.isChallengeEnabled(challenges.usernameXssChallenge)) {
+        req.app.locals.abused_ssti_bug = true
+      }
+      const match = username.match(/#{(.*)}/)
+      const code = match ? match[1] : username.substring(2, username.length - 1)
       try {
         if (!code) {
           throw new Error('Username is null')
         }
-        const singleQuoteRegex = /^'(?:[^'\\]|\\.)*'$/
-        const doubleQuoteRegex = /^"(?:[^"\\]|\\.)*"$/
-        const backtickRegex = /^`(?:[^`\\$]|\\.|\$(?!{))*`$/
-        const numericRegex = /^-?\d+(?:\.\d+)?$/
-        const booleanRegex = /^(?:true|false|null|undefined)$/
-
-        const isSafe = singleQuoteRegex.test(code) ||
-          doubleQuoteRegex.test(code) ||
-          backtickRegex.test(code) ||
-          numericRegex.test(code) ||
-          booleanRegex.test(code)
-
-        if (!isSafe) {
+        const isDangerous = /(?:process|global|globalThis|require|import|module|child_process|fs|constructor|__proto__|prototype|Function|eval|this|window|document)/i.test(code)
+        if (isDangerous) {
           throw new Error('Unsafe code execution blocked')
         }
-        username = eval(code) // eslint-disable-line no-eval
+        const result = vm.runInNewContext(code, Object.create(null), { timeout: 100 })
+        if (typeof result === 'function' || typeof result === 'symbol') {
+          throw new Error('Invalid result type')
+        }
+        displayUsername = username.replace(/#{(.*)}/, String(result))
       } catch (err) {
-        username = '\\' + username
+        displayUsername = username
       }
-    } else {
-      username = '\\' + username
     }
 
     const themeKey = config.get<string>('application.theme') as keyof typeof themes
     const theme = themes[themeKey] || themes['bluegrey-lightgreen']
 
-    if (username) {
-      template = template.replace(/_username_/g, username)
-    }
+    template = template.replace(/_username_/g, '#{displayUsername}')
     template = template.replace(/_emailHash_/g, security.hash(user?.email))
     template = template.replace(/_title_/g, entities.encode(config.get<string>('application.name')))
     template = template.replace(/_favicon_/g, favicon())
@@ -97,10 +91,16 @@ export function getUserProfile () {
     template = template.replace(/_primDark_/g, theme.primDark)
     template = template.replace(/_logo_/g, utils.extractFilename(config.get('application.logo')))
 
+    ;(user as any).displayUsername = displayUsername
+    if (user.dataValues) {
+      ;(user.dataValues as any).displayUsername = displayUsername
+    }
+
     try {
       const pug = (await import('pug')).default
       const fn = pug.compile(template)
-      const CSP = `img-src 'self' ${user?.profileImage}; script-src 'self' 'unsafe-eval'`
+      const sanitizedProfileImage = user?.profileImage ? user.profileImage.split(/[;\r\n]/)[0].replace(/['"]/g, '').trim() : ''
+      const CSP = `img-src 'self'${sanitizedProfileImage ? ` ${sanitizedProfileImage}` : ''}; script-src 'self' 'unsafe-eval'`
 
       challengeUtils.solveIf(challenges.usernameXssChallenge, () => {
         return username && user?.profileImage.match(/;[ ]*script-src(.)*'unsafe-inline'/g) !== null && utils.contains(username, '<script>alert(`xss`)</script>')
