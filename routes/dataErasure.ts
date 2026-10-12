@@ -101,15 +101,33 @@ router.post('/', (req: Request<Record<string, unknown>, Record<string, unknown>,
       }
 
       if (req.body.layout) {
-        const filePath: string = path.resolve(req.body.layout).toLowerCase()
-        const isForbiddenFile: boolean = (filePath.includes('ftp') || filePath.includes('ctf.key') || filePath.includes('encryptionkeys'))
+        if (typeof req.body.layout !== 'string') {
+          next(new Error('File access not allowed'))
+          return
+        }
+        const layoutsPath = path.resolve(__dirname, '../views/layouts')
+        const layoutsPathCwd = path.resolve('views/layouts')
+        const filePath = path.resolve(req.body.layout)
+        const resolvedUnderLayouts = path.resolve(layoutsPath, req.body.layout)
+        const isPathAllowed =
+          filePath.startsWith(layoutsPath + path.sep) ||
+          filePath.startsWith(layoutsPathCwd + path.sep) ||
+          resolvedUnderLayouts.startsWith(layoutsPath + path.sep) ||
+          resolvedUnderLayouts.startsWith(layoutsPathCwd + path.sep)
+        const filePathLower = filePath.toLowerCase()
+        const isForbiddenFile: boolean = !isPathAllowed ||
+          filePathLower.includes('ftp') ||
+          filePathLower.includes('ctf.key') ||
+          filePathLower.includes('encryptionkeys')
         if (!isForbiddenFile) {
+          const allowedLayout = (filePath.startsWith(layoutsPath + path.sep) || filePath.startsWith(layoutsPathCwd + path.sep)) ? filePath : resolvedUnderLayouts
           res.render('dataErasureResult', {
             ...req.body,
+            layout: allowedLayout,
             ...themeVars
           }, (error, html) => {
             if (!html || error) {
-              next(new Error(error.message))
+              next(new Error(error ? error.message : 'Render error'))
             } else {
               const sendlfrResponse: string = html.slice(0, 100) + '......'
               res.send(sendlfrResponse)
